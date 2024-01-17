@@ -5,9 +5,9 @@ import argparse
 
 def run(args):
     # data = dataset_generation.__dict__[args.dataset]()
-    min_support = 10
+    min_support = 1000
     processes = 1
-    data = pd.read_csv('test_dataset_2.dat', delimiter=' ', header=None)
+    data = pd.read_csv('chess.dat', delimiter=' ', header=None)
     enclat(data, processes, min_support)
     # frequent_itemsets, global_count_dist = find_frequent_itemsets(data=data,num_processes=args.num_processes,min_support=args.min_support)
 
