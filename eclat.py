@@ -1,8 +1,7 @@
-from collections import defaultdict
 import pandas as pd 
-from itertools import chain, combinations
+from itertools import  combinations
 from spicy import special
-from multiprocessing import Process, Manager, Lock, Pool
+from multiprocessing import Process, Manager, Lock
 import time
 
 
