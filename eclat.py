@@ -1,5 +1,5 @@
 import pandas as pd 
-from itertools import  combinations
+from itertools import  chain, combinations
 from spicy import special
 from multiprocessing import Process, Manager, Lock
 import time
@@ -10,7 +10,7 @@ def initial_count_L2(data, min_support, lock, global_count_dict, transactions_li
     transactions = []
     for index, row in data.iterrows():
         # Include all non-missing items in the transaction
-        transaction = row.dropna().astype(int).tolist()
+        transaction = row.dropna().astype(str).tolist()
         transactions.append(transaction)
 
     # Find frequent 2-itemsets
@@ -64,10 +64,11 @@ def create_schedule_L2(global_count_dict, processes):
         schedule_list[min_id].append(group['keys'])
     return schedule_list
 
-def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_id,L2_elements, lock, vertical_database):
+def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_id,L2_elements, lock, vertical_database, transaction_count):
     additional_id_value = proc_id * data_chunk_size
     # Iterate through each transaction and update the dictionaries
     local_vertical_database = {}
+    local_transaction_cout = {}
     for i, transaction in enumerate(tramsactions_chunk):
         for itemset in L2_elements:
             if all(str(item) in map(str, transaction) for item in itemset):
@@ -75,6 +76,12 @@ def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_i
                     local_vertical_database[itemset].add(i+additional_id_value)
                 else:
                     local_vertical_database[itemset] = {i+additional_id_value}
+        for element in transaction:
+            if element in local_transaction_cout:
+                local_transaction_cout[element].add(i+additional_id_value)
+            else:
+                local_transaction_cout[element] = {i+additional_id_value}
+
 
     
     with lock:
@@ -85,6 +92,13 @@ def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_i
                 vertical_database[key] = temp_value
             else:
                 vertical_database[key] = value
+        for key, value in local_transaction_cout.items():
+            if key in transaction_count:
+                temp_value = transaction_count[key]
+                temp_value.update(value)
+                transaction_count[key] = temp_value
+            else:
+                transaction_count[key] = value 
         
 def are_first_k_elements_equal(tuple1, tuple2, k):
     return tuple1[:k] == tuple2[:k]
@@ -137,6 +151,7 @@ def eclat(data, processes, min_support):
         processes_list = []
         
         transactions_list = manager.dict()
+        transaction_count = manager.dict()
         for i in range (processes):
             proc = Process(target = initial_count_L2, args=(data_chunks[i], min_support, lock, global_dict, transactions_list, i))
             processes_list.append(proc)
@@ -157,7 +172,7 @@ def eclat(data, processes, min_support):
         processes_list = []
         
         for i in range (processes):
-            proc = Process(target = vertical_database_transformation, args=(transactions_list[i], data_chunk_size, i,L2_elements, lock, vertical_database))
+            proc = Process(target = vertical_database_transformation, args=(transactions_list[i], data_chunk_size, i,L2_elements, lock, vertical_database, transaction_count))
             processes_list.append(proc)
             proc.start()
 
@@ -174,7 +189,82 @@ def eclat(data, processes, min_support):
         for proc in processes_list:
             proc.join()
 
-        return dict(vertical_database)
+        return dict(vertical_database), dict(transaction_count)
 
 
-                
+
+def subsets(arr):
+    return chain(*[combinations(arr, i) for i in range(1, len(arr))])
+
+def intersection(subset,transaction_count_dict ):
+    sets_for_subset_elements = []
+        
+    # Iterate through each element in the subset tuple
+    for element in subset:
+        if element in transaction_count_dict:
+            # Add the set corresponding to the current element to the list
+            sets_for_subset_elements.append(transaction_count_dict[element])
+    
+    # Intersect all the sets in the list
+    if sets_for_subset_elements:
+        intersection_of_sets = set.intersection(*sets_for_subset_elements)
+    else:
+        intersection_of_sets = set()
+    
+    # Set subset_support as the length of the intersection of sets
+    return len(intersection_of_sets)
+
+def calculate_confidence(itemset, subset, frequent_itemsets_dict, transaction_count_dict, min_confidence):
+    itemset_support = len(frequent_itemsets_dict[itemset])
+    if subset in frequent_itemsets_dict:
+        subset_support = len(frequent_itemsets_dict[subset])
+    else :
+        subset_support = intersection(subset, transaction_count_dict)
+        
+
+    if subset_support and subset_support != 0:
+        confidence = itemset_support / subset_support
+        if confidence > min_confidence:
+            subset_str = ', '.join(sorted(subset))
+            itemset_str = ', '.join(sorted(itemset))
+            confidence = round(confidence, 2)
+            return (subset_str,  itemset_str, confidence)
+        else :
+            None
+    return None
+
+def rule_generation_worker(itemsets, frequent_itemsets_dict, transaction_count_dict, results, min_confidence):
+    for itemset in itemsets:
+        for subset in subsets(itemset):
+            rule = calculate_confidence(itemset, frozenset(subset), frequent_itemsets_dict, transaction_count_dict, min_confidence)
+            if rule:
+                results.append(rule)
+
+def generate_rules_multithread(vertical_database, transaction_count, num_processes=4, min_confidence = 0.7):
+    with Manager() as manager:
+        frequent_itemsets_dict = manager.dict(vertical_database)
+        transaction_count_dict = manager.dict(transaction_count)
+        results = manager.list()
+
+        itemsets = list(vertical_database.keys())
+
+        # Creating pool of processes
+
+        # Splitting the itemsets into chunks for each process
+        chunk_size = len(itemsets) // num_processes 
+        rest_data = len(itemsets) % num_processes
+        chunks = [itemsets[i:i + chunk_size] for i in range(0, len(itemsets), chunk_size)]
+        if rest_data > 0:
+            chunks[-1].extend(itemsets[num_processes * chunk_size:])
+
+        # Start the worker processes
+        processes_list = []
+        for i in range (num_processes):
+            proc = Process(target = rule_generation_worker, args = (chunks[i], frequent_itemsets_dict, transaction_count_dict, results, min_confidence))
+            processes_list.append(proc)
+            proc.start()
+        
+        for proc in processes_list:
+            proc.join()
+
+        return list(results)            

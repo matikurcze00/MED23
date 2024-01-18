@@ -10,8 +10,8 @@ def save_file(association_rules):
 
     # Write the list to the file
     with open(f'{output_directory}\{output_file_path}', 'w') as file:
-        for rule, support in association_rules.items():
-            file.write(str(rule) + " : " + str(len(support)))
+        for rule in association_rules:
+            file.write(str(rule))
             file.write('\n')
 
 def load_dataset(dataset_name):
