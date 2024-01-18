@@ -1,8 +1,8 @@
 from collections import defaultdict
 import pandas as pd 
-from itertools import combinations
+from itertools import chain, combinations
 from spicy import special
-from multiprocessing import Process, Manager, Lock
+from multiprocessing import Process, Manager, Lock, Pool
 import time
 
 
@@ -90,70 +90,40 @@ def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_i
 def are_first_k_elements_equal(tuple1, tuple2, k):
     return tuple1[:k] == tuple2[:k]
 
-def calculate(Lk,vertical_database, k, min_support, time_dict,lock):
-    int_time = 0 
-    temp_time = 0 
-    vert_time = 0
-    start_time = time.time()
+def calculate(Lk,vertical_database, k, min_support):
+
     local_vertical_database = dict(vertical_database)
-    int_temp, temp_temp, new_local_vertical_database = compute_frequent(Lk,local_vertical_database, k, min_support )
+    new_local_vertical_database = compute_frequent(Lk,local_vertical_database, k, min_support )
 
-    time_dict['overall'] += time.time() - start_time
-    # print(f"overall : {time.time() - start_time}"  )
-
-    # print(f"int_temp : {int_temp}"  )
-    vert_start = time.time()
     vertical_database.update(new_local_vertical_database)
-    vert_temp = time.time()-vert_start
-    
-    # print(f"vert_temp : {vert_temp}"  )
-    time_dict['int_temp'] += int_temp
-    time_dict['temp_temp'] += temp_temp
-    time_dict['vert_temp'] += vert_temp
+
 
 def compute_frequent(Lk,local_vertical_database, k, min_support):
-    int_time= 0
-    temp_time = 0 
-    vert_time = 0
     itemsets_dict = {}
     for Ek in Lk:
         if len(Ek) > 1:
             Lk_1_list = []
-            temp_vertical_database = {} #dodanie nowych wartosci
+            temp_vertical_database = {}
             for i in range(len(Ek)-1) : #Checking all Ek-1
                 Ek_temp = []
                 for j in range(i+1, len(Ek)):
-                    start_time = time.time()
                     common_elements = local_vertical_database[Ek[i]] & local_vertical_database[Ek[j]]
-                    int_time += time.time() - start_time
                     if len(common_elements) > min_support:
-                        start_time = time.time()
                         new_key = Ek[i] + (Ek[j][-1],)
                         Ek_temp.append(new_key)
                         temp_vertical_database[new_key] = common_elements
-                        temp_time += time.time() - start_time
                 if Ek_temp:
                     Lk_1_list.append(Ek_temp)
-            new_k = k + 1
+            k_1 = k + 1
             if Lk_1_list :
-                start_time = time.time()
-                
-                # vertical_database.update(temp_vertical_database)
-                # local_vertical_database.update(temp_vertical_database)       
-                vert_time += time.time() - start_time
-                int_temp, temp_temp, new_temp_vertical_database = compute_frequent(Lk_1_list, temp_vertical_database, new_k, min_support)
-                int_time += int_temp
-                temp_time += temp_temp
+                new_temp_vertical_database = compute_frequent(Lk_1_list, temp_vertical_database, k_1, min_support)
                 itemsets_dict.update(new_temp_vertical_database)
                 itemsets_dict.update(temp_vertical_database)
-                
-                # vert_time += vert_temp
-    return int_time, temp_time, itemsets_dict
+    return itemsets_dict
         
 
-def enclat(data, processes, min_support):
+def eclat(data, processes, min_support):
     #Global distribution using a shared manager
-    # print("start")
     with Manager() as manager:
         start_time = time.time()
         global_dict = manager.dict()
@@ -180,13 +150,8 @@ def enclat(data, processes, min_support):
         for key in keys_to_remove:
             del global_dict[key]
         global_dict = dict(sorted(global_dict.items()))
-        # print("global dict")
-        # print(global_dict)
-        print(len(global_dict.keys()))
-        #list_of_list
         schedule_list = create_schedule_L2(global_dict, processes)
-        # print ("schedule_list")
-        # print (schedule_list)
+
         
         L2_elements = list(global_dict.keys())        
         vertical_database = manager.dict()
@@ -200,37 +165,72 @@ def enclat(data, processes, min_support):
         for proc in processes_list:
             proc.join()
 
-        # print("VERTICAL DB")
-        # print(len(vertical_database.keys()))
-        end_time = time.time()
 
-        # print(f'TIME : {end_time - start_time}')
         processes_list = []
-        time_dict = manager.dict()
-        time_dict['int_temp'] = 0
-        time_dict['temp_temp'] = 0
-        time_dict['vert_temp'] = 0
-        time_dict['overall'] = 0
-        
         for i in range (processes):
-            proc = Process(target = calculate, args=(schedule_list[i], vertical_database, k, min_support, time_dict, lock))
+            proc = Process(target = calculate, args=(schedule_list[i], vertical_database,k , min_support))
             processes_list.append(proc)
             proc.start()
         
         for proc in processes_list:
             proc.join()
-        # print("VERTICAL DB")
-        # print(len(vertical_database.keys()))
 
-        end_time = time.time()
-        print(f'TIME : {end_time - start_time}')
-        # for key, value in time_dict.items():
-        #     print(f'{key} : {value/processes}')
-        vert = time_dict['vert_temp']
-        # print (f'vert time = {vert}')
-        if processes == 6:
-            print(f'itemset len : {len(vertical_database.keys())}')
+        return dict(vertical_database)
 
+
+def subsets(arr):
+    """ Returns non empty subsets of arr"""
+    return chain(*[combinations(arr, i + 1) for i, a in enumerate(arr)])
+    
+
+def calculate_confidence(itemset, subset, frequent_itemsets_dict, min_confidence):
+    itemset_support = len(frequent_itemsets_dict[itemset])
+    subset_support = len(frequent_itemsets_dict[subset])
+    remaining_set = itemset.difference(subset)
+    remaining_set_support = len(frequent_itemsets_dict[remaining_set])
+    
+    if subset_support and subset_support != 0:
+        confidence = itemset_support / subset_support
+        if confidence > min_confidence:
+            return (subset, remaining_set, itemset_support, confidence)
+        else :
+            None
+    return None
+
+def rule_generation_worker(itemsets, frequent_itemsets_dict, total_transactions, results, min_confidence):
+    """ Worker function for multiprocessing """
+    for itemset in itemsets:
+        for subset in subsets(itemset):
+            rule = calculate_confidence(itemset, frozenset(subset), frequent_itemsets_dict, total_transactions, min_confidence)
+            if rule:
+                results.append(rule)
+
+def generate_rules_multithread(vertical_database, num_processes=4, min_confidence = 0.7):
+    """ Generate rules using multiprocessing with Manager """
+    with Manager() as manager:
+        frequent_itemsets_dict = manager.dict(vertical_database)
+        results = manager.list()
+
+        itemsets = list(vertical_database.keys())
+
+        # Creating pool of processes
+        pool = Pool(processes=num_processes)
+
+        # Splitting the itemsets into chunks for each process
+        chunk_size = len(itemsets) // num_processes 
+        rest_data = len(itemsets) % num_processes
+        chunks = [itemsets[i:i + chunk_size] for i in range(0, len(itemsets), chunk_size)]
+        if rest_data > 0:
+            chunks[-1] = pd.concat([chunks[-1], itemsets[num_processes * chunk_size:]])
+
+        # Start the worker processes
+        for chunk in chunks:
+            pool.apply_async(rule_generation_worker, (chunk, frequent_itemsets_dict, results, min_confidence))
+
+        pool.close()
+        pool.join()
+
+        return list(results)
 
 
                 
