@@ -25,7 +25,6 @@ def initial_count_L2(data, min_support, lock, global_count_dict, transactions_li
 
     # Calculate support for each itemset
     frequent_itemsets = {itemset: support  for itemset, support in itemset_support.items()}
-    #Descending order
     with lock:
         for itemset, support in frequent_itemsets.items():
             if itemset in global_count_dict:
@@ -97,14 +96,14 @@ def calculate(Lk,vertical_database, k, min_support, time_dict,lock):
     vert_time = 0
     start_time = time.time()
     local_vertical_database = dict(vertical_database)
-    int_temp, temp_temp, local_vertical_database = compute_frequent(Lk,local_vertical_database, k, min_support )
+    int_temp, temp_temp, new_local_vertical_database = compute_frequent(Lk,local_vertical_database, k, min_support )
 
     time_dict['overall'] += time.time() - start_time
     # print(f"overall : {time.time() - start_time}"  )
 
     # print(f"int_temp : {int_temp}"  )
     vert_start = time.time()
-    vertical_database.update(local_vertical_database)
+    vertical_database.update(new_local_vertical_database)
     vert_temp = time.time()-vert_start
     
     # print(f"vert_temp : {vert_temp}"  )
@@ -116,6 +115,7 @@ def compute_frequent(Lk,local_vertical_database, k, min_support):
     int_time= 0
     temp_time = 0 
     vert_time = 0
+    itemsets_dict = {}
     for Ek in Lk:
         if len(Ek) > 1:
             Lk_1_list = []
@@ -139,20 +139,23 @@ def compute_frequent(Lk,local_vertical_database, k, min_support):
                 start_time = time.time()
                 
                 # vertical_database.update(temp_vertical_database)
-                local_vertical_database.update(temp_vertical_database)       
-
+                # local_vertical_database.update(temp_vertical_database)       
                 vert_time += time.time() - start_time
-                int_temp, temp_temp, local_vertical_database = compute_frequent(Lk_1_list,local_vertical_database, new_k, min_support)
+                int_temp, temp_temp, new_temp_vertical_database = compute_frequent(Lk_1_list, temp_vertical_database, new_k, min_support)
                 int_time += int_temp
                 temp_time += temp_temp
+                itemsets_dict.update(new_temp_vertical_database)
+                itemsets_dict.update(temp_vertical_database)
+                
                 # vert_time += vert_temp
-    return int_time, temp_time, local_vertical_database
+    return int_time, temp_time, itemsets_dict
         
 
 def enclat(data, processes, min_support):
     #Global distribution using a shared manager
-    print("start")
+    # print("start")
     with Manager() as manager:
+        start_time = time.time()
         global_dict = manager.dict()
         if processes > len(data) : processes = len(data)
         data_chunk_size = len(data) // processes
@@ -163,7 +166,7 @@ def enclat(data, processes, min_support):
         
         lock = Lock()
         processes_list = []
-        start_time = time.time()
+        
         transactions_list = manager.dict()
         for i in range (processes):
             proc = Process(target = initial_count_L2, args=(data_chunks[i], min_support, lock, global_dict, transactions_list, i))
@@ -179,7 +182,7 @@ def enclat(data, processes, min_support):
         global_dict = dict(sorted(global_dict.items()))
         # print("global dict")
         # print(global_dict)
-        # print(len(global_dict.keys()))
+        print(len(global_dict.keys()))
         #list_of_list
         schedule_list = create_schedule_L2(global_dict, processes)
         # print ("schedule_list")
@@ -208,7 +211,7 @@ def enclat(data, processes, min_support):
         time_dict['temp_temp'] = 0
         time_dict['vert_temp'] = 0
         time_dict['overall'] = 0
-        start_time = time.time()
+        
         for i in range (processes):
             proc = Process(target = calculate, args=(schedule_list[i], vertical_database, k, min_support, time_dict, lock))
             processes_list.append(proc)
@@ -221,10 +224,12 @@ def enclat(data, processes, min_support):
 
         end_time = time.time()
         print(f'TIME : {end_time - start_time}')
-        for key, value in time_dict.items():
-            print(f'{key} : {value/processes}')
+        # for key, value in time_dict.items():
+        #     print(f'{key} : {value/processes}')
         vert = time_dict['vert_temp']
-        print (f'vert time = {vert}')
+        # print (f'vert time = {vert}')
+        if processes == 6:
+            print(f'itemset len : {len(vertical_database.keys())}')
 
 
 
