@@ -1,55 +1,39 @@
 from collections import defaultdict
 import pandas as pd 
-from itertools import combinations
+from itertools import chain, combinations
 from spicy import special
-from multiprocessing import Process, Manager, Lock
+from multiprocessing import Process, Manager, Lock, Pool
 import time
-
-#Loading data
-
-min_support = 3
-max_length = 4
-processes = 2
-data = pd.read_csv('test_dataset.dat', delimiter=' ', header=None)
-
-#Global distribution using a shared manager
-# with Manager() as manager:
-#     global_count_dist = manager.list()
-#     if processes > len(data) : processes = len(data)
-#     data_chunk_size = len(data) // processes
-#     rest_data = len(data) % processes
-#     data_chunks = [data[i * data_chunk_size:(i + 1) * data_chunk_size] for i in range(processes)]
-#     data_chunks[-1].extend(data[processes * data_chunk_size:processes * data_chunk_size + rest_data])
 
 
 #1st step
-transactions = []
-for index, row in data.iterrows():
-    # Include all non-missing items in the transaction
-    transaction = row.dropna().astype(int).tolist()
-    transactions.append(transaction)
+def initial_count_L2(data, min_support, lock, global_count_dict, transactions_list, proc_id):
+    transactions = []
+    for index, row in data.iterrows():
+        # Include all non-missing items in the transaction
+        transaction = row.dropna().astype(int).tolist()
+        transactions.append(transaction)
 
-# Find frequent 2-itemsets
-itemset_support = {}
-for transaction in transactions:
-    for itemset in combinations(transaction, 2):  
-        if itemset in itemset_support:
-            itemset_support[itemset] += 1
-        else:
-            itemset_support[itemset] = 1
+    # Find frequent 2-itemsets
+    itemset_support = {}
+    for transaction in transactions:
+        for itemset in combinations(transaction, 2):  
+            if itemset in itemset_support:
+                itemset_support[itemset] += 1
+            else:
+                itemset_support[itemset] = 1
 
-# Calculate support for each itemset
-frequent_itemsets = {itemset: support  for itemset, support in itemset_support.items() if support  >= min_support}
-#Descending order
-frequent_itemsets = dict(sorted(frequent_itemsets.items()))
-print('frequent_itemsets')
-print(frequent_itemsets)
+    # Calculate support for each itemset
+    frequent_itemsets = {itemset: support  for itemset, support in itemset_support.items()}
+    with lock:
+        for itemset, support in frequent_itemsets.items():
+            if itemset in global_count_dict:
+                global_count_dict[itemset] += support
+            else:
+                global_count_dict[itemset] = support
+        transactions_list[proc_id] = transactions
+        
 
-#Agregate
-# SUMMING
-#2nd phase
-
-#Part 1
 def find_lowest_scheduling_value(value_list):
     min_id = 0
     min_value = value_list[0]
@@ -59,106 +43,139 @@ def find_lowest_scheduling_value(value_list):
             min_value = value_list[i]
     return min_id
 
-list_of_list = []
-value = []
-for i in range(processes) :
-    value.append(0)
-    list_of_list.append([])
+def create_schedule_L2(global_count_dict, processes):
+    schedule_list = []
+    proc_schedule_value = []
+    for i in range(processes) :
+        proc_schedule_value.append(0)
+        schedule_list.append([])
 
-#Creating schedule
-grouped_items = {}
-for key, val in frequent_itemsets.items():
-    first_element = key[0]
-    if first_element not in grouped_items:
-        grouped_items[first_element] = {'total': 0, 'keys': []}
-    grouped_items[first_element]['total'] += val
-    grouped_items[first_element]['keys'].append(list(key))
+    #Creating schedule
+    grouped_items = {}
+    for itemset, support in global_count_dict.items():
+        first_element = itemset[0]
+        if first_element not in grouped_items:
+            grouped_items[first_element] = {'total': 0, 'keys': []}
+        grouped_items[first_element]['total'] += support
+        grouped_items[first_element]['keys'].append((itemset))
 
-for group in grouped_items.values():
-    min_id = find_lowest_scheduling_value(value)
-    value[min_id] += special.binom( group['total'], 2)
-    list_of_list[min_id].append(group['keys'])
+    for group in grouped_items.values():
+        min_id = find_lowest_scheduling_value(proc_schedule_value)
+        proc_schedule_value[min_id] += special.binom( group['total'], 2)
+        schedule_list[min_id].append(group['keys'])
+    return schedule_list
 
-
-# for i in range(processes):
-#     print(list_of_list[i])
-#     print(value[i])
-
-#Part 2 
-itemset_transactions_list = []
-for process_list in list_of_list[0]:
-    # Create itemsets as tuples
-    itemsets = set(tuple(sublist) for sublist in process_list)
-    # Sort the itemsets
-    sorted_itemsets = sorted(itemsets, key=lambda x: x)
-    # Create dictionary with sorted itemsets
-    itemset_transactions = {itemset: set() for itemset in sorted_itemsets}
-    itemset_transactions_list.append(itemset_transactions)
-
-# Iterate through each transaction and update the dictionaries
-for i, transaction in enumerate(transactions):
-    for itemset_transactions in itemset_transactions_list:
-        for itemset in itemset_transactions:
+def vertical_database_transformation(tramsactions_chunk, data_chunk_size, proc_id,L2_elements, lock, vertical_database):
+    additional_id_value = proc_id * data_chunk_size
+    # Iterate through each transaction and update the dictionaries
+    local_vertical_database = {}
+    for i, transaction in enumerate(tramsactions_chunk):
+        for itemset in L2_elements:
             if all(str(item) in map(str, transaction) for item in itemset):
-                itemset_transactions[itemset].add(i)
+                if itemset in local_vertical_database:
+                    local_vertical_database[itemset].add(i+additional_id_value)
+                else:
+                    local_vertical_database[itemset] = {i+additional_id_value}
 
-# print(itemset_transactions_list)
-
-
-Final_Lk = []
-
-#Step 3
-#Asynchronous Phase
-keys = list(itemset_transactions_list[0].keys())
-
-# for i in range (len(keys)):
-#     print(itemset_transactions_list[0][keys[i]])
-
+    
+    with lock:
+        for key, value in local_vertical_database.items():
+            if key in vertical_database:
+                temp_value = vertical_database[key]
+                temp_value.update(value)
+                vertical_database[key] = temp_value
+            else:
+                vertical_database[key] = value
+        
 def are_first_k_elements_equal(tuple1, tuple2, k):
     return tuple1[:k] == tuple2[:k]
 
-# def partition_Lk(Lk, k):
-#     grouped_dicts = defaultdict(list)
-#     for L in Lk:
-#         for key in L.keys():
-#             group_key = key[:k]  # Extract the first k elements of the tuple
-#             grouped_dicts[group_key].append(L)
+def calculate(Lk,vertical_database, k, min_support):
 
-#     # Convert grouped_dicts to a list of lists
-#     return list(grouped_dicts.values())
+    local_vertical_database = dict(vertical_database)
+    new_local_vertical_database = compute_frequent(Lk,local_vertical_database, k, min_support )
+
+    vertical_database.update(new_local_vertical_database)
 
 
-def Compute_Frequent(Ek, k, final_itemsets):
-    keys = list(Ek.keys())
-    Lk_list = []
-    for i in range(len(keys)-1) : #Checking all Ek-1
-        Ek_temp = {}
-        for j in range(i+1, len(keys)):
-            if are_first_k_elements_equal(keys[i], keys[j], k-1):
-                common_elements = list(set(Ek[keys[i]]) & set(Ek[keys[j]]))
-                if len(common_elements) > min_support:
-                    new_key = keys[i] + (keys[j][-1],)
-                    Ek_temp[new_key] = common_elements
-            else :
-                break
-        if Ek_temp:
-            Lk_list.append(Ek_temp)
-    new_k = k + 1
-    if not Lk_list :
-        final_itemsets.append(Ek)        
-    elif new_k == max_length :
-        final_itemsets.append(Lk_list)
-    # else :
-    #     Lk_list = partition_Lk(Lk_list_temp, k-1)
-    else :    
-        for itemset in Lk_list:
-            Compute_Frequent(itemset, k+1, final_itemsets)
+def compute_frequent(Lk,local_vertical_database, k, min_support):
+    itemsets_dict = {}
+    for Ek in Lk:
+        if len(Ek) > 1:
+            Lk_1_list = []
+            temp_vertical_database = {}
+            for i in range(len(Ek)-1) : #Checking all Ek-1
+                Ek_temp = []
+                for j in range(i+1, len(Ek)):
+                    common_elements = local_vertical_database[Ek[i]] & local_vertical_database[Ek[j]]
+                    if len(common_elements) > min_support:
+                        new_key = Ek[i] + (Ek[j][-1],)
+                        Ek_temp.append(new_key)
+                        temp_vertical_database[new_key] = common_elements
+                if Ek_temp:
+                    Lk_1_list.append(Ek_temp)
+            k_1 = k + 1
+            if Lk_1_list :
+                new_temp_vertical_database = compute_frequent(Lk_1_list, temp_vertical_database, k_1, min_support)
+                itemsets_dict.update(new_temp_vertical_database)
+                itemsets_dict.update(temp_vertical_database)
+    return itemsets_dict
+        
+
+def eclat(data, processes, min_support):
+    #Global distribution using a shared manager
+    with Manager() as manager:
+        start_time = time.time()
+        global_dict = manager.dict()
+        if processes > len(data) : processes = len(data)
+        data_chunk_size = len(data) // processes
+        rest_data = len(data) % processes
+        data_chunks = [data[i * data_chunk_size:(i + 1) * data_chunk_size] for i in range(processes)]
+        if rest_data > 0:
+            data_chunks[-1] = pd.concat([data_chunks[-1], data[processes * data_chunk_size:]])
+        
+        lock = Lock()
+        processes_list = []
+        
+        transactions_list = manager.dict()
+        for i in range (processes):
+            proc = Process(target = initial_count_L2, args=(data_chunks[i], min_support, lock, global_dict, transactions_list, i))
+            processes_list.append(proc)
+            proc.start()
+
+        for proc in processes_list:
+            proc.join()
+        k = 2
+        keys_to_remove = [key for key, value in global_dict.items() if value < min_support]
+        for key in keys_to_remove:
+            del global_dict[key]
+        global_dict = dict(sorted(global_dict.items()))
+        schedule_list = create_schedule_L2(global_dict, processes)
+
+        
+        L2_elements = list(global_dict.keys())        
+        vertical_database = manager.dict()
+        processes_list = []
+        
+        for i in range (processes):
+            proc = Process(target = vertical_database_transformation, args=(transactions_list[i], data_chunk_size, i,L2_elements, lock, vertical_database))
+            processes_list.append(proc)
+            proc.start()
+
+        for proc in processes_list:
+            proc.join()
 
 
-final_itemsets = []
-for itemset_list in itemset_transactions_list:
-    k = 2
-    Compute_Frequent(itemset_list, k, final_itemsets)
+        processes_list = []
+        for i in range (processes):
+            proc = Process(target = calculate, args=(schedule_list[i], vertical_database,k , min_support))
+            processes_list.append(proc)
+            proc.start()
+        
+        for proc in processes_list:
+            proc.join()
 
-print(final_itemsets)
+        return dict(vertical_database)
+
+
                 
